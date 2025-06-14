@@ -1,0 +1,14 @@
+{% extends 'base.html' %}
+
+{% block body %}
+  <form action="" method="post">
+    {% for field in form %}
+      <label>{{ field.label }}</label>
+      {{ field(class="input") }}
+      {% for error in field.errors %}
+        <p class="text-red-500">{{ error }}</p>
+      {% endfor %}
+    {% endfor %}
+    <button type="submit">Submit</button>
+  </form>
+{% endblock %}
