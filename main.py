@@ -3,9 +3,9 @@ from typing import Type
 from fastapi import Request, FastAPI, Depends
 from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
-from wtforms import Form, ValidationError, validators, StringField, IntegerField
+from wtforms import Form, ValidationError, validators, StringField, IntegerField, SelectField
 from sqlalchemy import Column, Integer, String, Text, ForeignKey
-from sqlalchemy.orm import Mapper, DeclarativeBase, Session
+from sqlalchemy.orm import Mapper, DeclarativeBase, Session, DeclarativeMeta
 
 from db import SessionLocal, engine, Base
 
@@ -42,7 +42,25 @@ def Unique(model, field_name: str, session_getter):
     return _validate
 
 
-def form_for_model(model: Type[DeclarativeBase]) -> Type[Form]:
+def _resolve_model(table, base: DeclarativeMeta) -> type:
+    """
+    Найти модель, связанную с таблицей, среди потомков DeclarativeBase.
+    
+    :param table: sqlalchemy.Table
+    :param base: DeclarativeBase или declarative_base()
+    """
+    for mapper in base.registry.mappers:
+        cls = mapper.class_
+        if hasattr(cls, '__table__') and cls.__table__ == table:
+            return cls
+    raise ValueError(f"Не найдена модель для таблицы '{table.name}'")
+
+
+def nullable_int(val):
+    return int(val) if val not in ("", None) else None
+
+
+def form_for_model(model: Type[DeclarativeBase], base: DeclarativeMeta, session: Session) -> Type[Form]:
     mapper: Mapper = model.__mapper__
     fields = {}
 
@@ -69,9 +87,22 @@ def form_for_model(model: Type[DeclarativeBase]) -> Type[Form]:
             fields[name] = StringField(name.capitalize(), validators=_validators)
 
         elif isinstance(type_, Integer):
-            fields[name] = IntegerField(name.capitalize(), validators=_validators)
+            fk = next(iter(column.foreign_keys), None)
+            if fk:
+                # Внешний ключ → SelectField
+                target_table = fk.column.table
+                target_model = _resolve_model(target_table, base)
 
-        # Можно добавить больше типов (Boolean, Float и т.д.)
+                # Создаём choices из target_model
+                # session = session_getter()
+                rows = session.query(target_model).all()
+                choices = [('', '---')] + [(getattr(row, fk.column.name), str(row)) for row in rows]
+
+                fields[name] = SelectField(name.capitalize(), choices=choices, coerce=nullable_int, validators=_validators)
+            else:
+                fields[name] = IntegerField(name.capitalize(), validators=_validators)
+
+        # * Можно добавить больше типов (Boolean, Float и т.д.)
 
     return type(f"{model.__name__}Form", (Form,), fields)
 
@@ -80,6 +111,9 @@ class Color(Base):
     __tablename__ = "colors"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(100), unique=True, nullable=False)
+
+    def __str__(self):
+        return self.name
 
 
 class Flower(Base):
@@ -119,9 +153,9 @@ def x():
 
 
 @app.get('/{model_class_name}')
-def new(request: Request, model_class_name: str):
+def new(request: Request, model_class_name: str, db: Session = Depends(get_db)):
     model_class = models.get(model_class_name)
-    form = form_for_model(model_class)()
+    form = form_for_model(model_class, Base, db)()
     return templating.TemplateResponse(request, 'form.html', {'form': form})
 
 
@@ -129,7 +163,7 @@ def new(request: Request, model_class_name: str):
 async def create(request: Request, model_class_name: str, db: Session = Depends(get_db)):
     form_data = await request.form()
     model_class = models.get(model_class_name)
-    form = form_for_model(model_class)(formdata=form_data)
+    form = form_for_model(model_class, Base, db)(formdata=form_data)
     if form.validate():
         model_instance = model_class(**form.data)
         db.add(model_instance)
